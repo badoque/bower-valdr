@@ -1,7 +1,7 @@
 /**
- * valdr - v1.1.5 - 2015-09-22
+ * valdr - v1.1.5 - 2016-05-01
  * https://github.com/netceteragroup/valdr
- * Copyright (c) 2015 Netcetera AG
+ * Copyright (c) 2016 Netcetera AG
  * License: MIT
  */
 (function (window, document) {
@@ -87,6 +87,9 @@ angular.module('valdr')
        */
       notEmpty: function (value) {
         if (this.isNaN(value)) {
+          return false;
+        }
+        if (angular.isArray(value) && value.length === 0){
           return false;
         }
         return angular.isDefined(value) && value !== '' && value !== null;
@@ -547,10 +550,31 @@ angular.module('valdr')
         'valdrPastValidator',
         'valdrPatternValidator',
         'valdrHibernateEmailValidator'
-      ];
+      ],
+      dependencies = {};
+
+    var initDependencies = function(){
+      angular.forEach(constraints, function(typeFields, typeName){
+        dependencies[typeName] = {};
+        angular.forEach(typeFields, function(fieldConstraints, fieldName){
+          angular.forEach(fieldConstraints, function (constraint) {
+            if(constraint.hasOwnProperty('requireModels')){
+              angular.forEach(constraint.requireModels, function(modelName){
+                if(dependencies[typeName].hasOwnProperty(modelName) && dependencies[typeName][modelName].length !== undefined){
+                  dependencies[typeName][modelName].push(fieldName);
+                } else {
+                  dependencies[typeName][modelName] = [fieldName];
+                }
+              });
+            }
+          });
+        });
+      });
+    };
 
     var addConstraints = function (newConstraints) {
       angular.extend(constraints, newConstraints);
+      initDependencies();
     };
 
     this.addConstraints = addConstraints;
@@ -559,6 +583,7 @@ angular.module('valdr')
       if (angular.isArray(constraintNames)) {
         angular.forEach(constraintNames, function (name) {
           delete constraints[name];
+          delete dependencies[name];
         });
       } else if (angular.isString(constraintNames)) {
         delete constraints[constraintNames];
@@ -583,8 +608,8 @@ angular.module('valdr')
     };
 
     this.$get =
-      ['$log', '$injector', '$rootScope', '$http', 'valdrEvents', 'valdrUtil', 'valdrClasses',
-        function ($log, $injector, $rootScope, $http, valdrEvents, valdrUtil, valdrClasses) {
+      ['$log', '$injector', '$rootScope', '$http', '$timeout', 'valdrEvents', 'valdrUtil', 'valdrClasses',
+        function ($log, $injector, $rootScope, $http, $timeout, valdrEvents, valdrUtil, valdrClasses) {
 
           // inject all validators
           angular.forEach(validatorNames, function (validatorName) {
@@ -629,7 +654,7 @@ angular.module('valdr')
              * @param value the value to validate
              * @returns {*}
              */
-            validate: function (typeName, fieldName, value) {
+            validate: function (typeName, fieldName, value, getOtherModelsDataOnForm) {
 
               var validResult = { valid: true },
                 typeConstraints = constraintsForType(typeName);
@@ -649,7 +674,56 @@ angular.module('valdr')
                     return validResult;
                   }
 
-                  var valid = validator.validate(value, constraint);
+                  var getRequiredModelsValues = function(constraint){
+                    var criteria = function(key){
+                      var found = false;
+                      angular.forEach(constraint.requireModels, function(modelName){
+                        if (key === modelName){
+                          found = true;
+                          return false;
+                        }
+                      });
+                      return found;
+                    };
+
+                    var requireModels = {};
+                    angular.forEach(getOtherModelsDataOnForm(criteria), function(modelData, key){
+                      requireModels[key] = modelData.$modelValue;
+                    });
+                    return requireModels;
+                  };
+
+                  var getOtherModelsValues = function(fieldName){
+                    
+                    if(getOtherModelsDataOnForm !== undefined){
+                      var criteria = function(key){
+                        return fieldName !== key;
+                      };
+                      return getOtherModelsDataOnForm(criteria);
+                    } else {
+                      return {};
+                    }
+                    
+                  };
+
+                  var propagateDependentFieldsValidation = function(fieldName, typeName){
+                    angular.forEach(getOtherModelsValues(fieldName), function(modelData, key){
+                      if(dependencies[typeName][fieldName] !== undefined && dependencies[typeName][fieldName].indexOf(key) >= 0){
+                        $timeout(function(){
+                          modelData.$validate();
+                        });
+                      }
+                    });
+                  };
+
+                  var valid;
+                  if(constraint.hasOwnProperty('requireModels')){
+                    valid = validator.validate(value, constraint, getRequiredModelsValues(constraint));
+                    propagateDependentFieldsValidation(fieldName, typeName);
+                  } else {
+                    valid = validator.validate(value, constraint);
+                    propagateDependentFieldsValidation(fieldName, typeName);
+                  } 
                   var validationResult = {
                     valid: valid,
                     value: value,
@@ -793,7 +867,10 @@ var valdrFormGroupDirectiveDefinition =
         };
 
         this.removeMessageElement = function (ngModelController) {
-          messageElements[ngModelController.$name].remove();
+          if (messageElements[ngModelController.$name]) {
+            messageElements[ngModelController.$name].remove();
+            delete messageElements[ngModelController.$name];
+          }
         };
 
       }]
@@ -802,6 +879,7 @@ var valdrFormGroupDirectiveDefinition =
 
 angular.module('valdr')
   .directive('valdrFormGroup', valdrFormGroupDirectiveDefinition);
+
 angular.module('valdr')
 
 /**
@@ -838,6 +916,21 @@ var nullValdrFormGroupController = {
   removeFormItem: angular.noop
 };
 
+function extractModelValuesFromFormController(FormController){
+  console.log('form');
+  return function(criteria){
+    var otherModelValuesOnForm = {};
+    if(FormController !== undefined){
+      angular.forEach(FormController, function(value, key){
+        if(key[0] !== '$' && criteria(key)){
+          otherModelValuesOnForm[key] = value;
+        }
+      });
+    }
+    return otherModelValuesOnForm;
+  };
+}
+
 /**
  * This directive adds validation to all input and select fields as well as to explicitly enabled elements which are
  * bound to an ngModel and are surrounded by a valdrType directive. To prevent adding validation to specific fields,
@@ -847,13 +940,14 @@ var valdrFormItemDirectiveDefinitionFactory = function (restrict) {
     return ['valdrEvents', 'valdr', 'valdrUtil', function (valdrEvents, valdr, valdrUtil) {
       return {
         restrict: restrict,
-        require: ['?^valdrType', '?^ngModel', '?^valdrFormGroup', '?^valdrEnabled'],
+        require: ['?^valdrType', '?^ngModel', '?^valdrFormGroup', '?^valdrEnabled', '?^form'],
         link: function (scope, element, attrs, controllers) {
 
           var valdrTypeController = controllers[0],
             ngModelController = controllers[1],
             valdrFormGroupController = controllers[2] || nullValdrFormGroupController,
             valdrEnabled = controllers[3] || nullValdrEnabledController,
+            FormController = controllers[4],
             valdrNoValidate = attrs.valdrNoValidate,
             fieldName = attrs.name;
 
@@ -905,8 +999,9 @@ var valdrFormItemDirectiveDefinitionFactory = function (restrict) {
             }
           };
 
-          var validate = function (modelValue) {
-            var validationResult = valdr.validate(valdrTypeController.getType(), fieldName, modelValue);
+          var validate = function(modelValue){
+            var getOtherModelValuesOnForm = extractModelValuesFromFormController(FormController);
+            var validationResult = valdr.validate(valdrTypeController.getType(), fieldName, modelValue, getOtherModelValuesOnForm);
             updateNgModelController(validationResult);
             return valdrEnabled.isEnabled() ? validationResult.valid : true;
           };

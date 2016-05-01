@@ -1,4 +1,8 @@
 # Changelog
+## 1.1.6 - 2016-04-29
+- Feat: Allow async validators. See [#57](https://github.com/netceteragroup/valdr/issues/57)
+- Feat: Validate one input against another. See [#68](https://github.com/netceteragroup/valdr/issues/68)
+
 ## 1.1.5 - 2015-09-22
 - Don't throw exception if an input has no name and valdr is disabled [#92](https://github.com/netceteragroup/valdr/pull/92)
 
